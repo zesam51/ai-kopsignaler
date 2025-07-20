@@ -1,45 +1,61 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
-import streamlit as st
+from sklearn.metrics import mean_squared_error
+from datetime import date, timedelta
 
-TICKERS = ['VOLV-B.ST', 'ERIC-B.ST', 'SEB-A.ST', 'HM-B.ST', 'ATCO-A.ST']
+st.set_page_config(page_title="AI Köpsignaler", layout="wide")
+st.title("📈 AI Köpsignaler för Svenska Aktier")
 
-def prepare_data(ticker):
-    df = yf.download(ticker, start="2018-01-01", end="2024-12-31")
-    df['SMA50'] = df['Close'].rolling(50).mean()
-    df['SMA200'] = df['Close'].rolling(200).mean()
-    df['RSI'] = 100 - 100 / (1 + df['Close'].pct_change().rolling(14).apply(
-        lambda x: (x[x > 0].mean()) / (-x[x < 0].mean() + 1e-5)))
-    df['Future'] = df['Close'].shift(-10)
-    df['Target'] = (df['Future'] > df['Close'] * 1.05).astype(int)
-    return df.dropna()
-
-def get_ai_signal(df):
-    features = ['SMA50', 'SMA200', 'RSI']
-    X = df[features]; y = df['Target']
-    X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
-    model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
-    model.fit(X_train, y_train)
-    latest = df[features].iloc[-1:]
-    prob = model.predict_proba(latest)[0][1]
-    signal = "📈 KÖP" if prob > 0.6 else "⏳ VÄNTA"
-    return signal, prob
-
-st.title("📊 AI‑köpsignaler – Svenska aktier")
+stocks = ['VOLV-B.ST', 'ERIC-B.ST', 'SEB-A.ST', 'SWED-A.ST', 'HM-B.ST', 'TEL2-B.ST']
+start_date = date.today() - timedelta(days=365 * 3)
+end_date = date.today()
 
 results = []
-for ticker in TICKERS:
-    with st.spinner(f"Läser {ticker}..."):
-        try:
-            df = prepare_data(ticker)
-            signal, prob = get_ai_signal(df)
-            results.append({'Aktie': ticker.replace('.ST',''),
-                            'Signal': signal,
-                            'Köpsannolikhet': f"{prob:.2%}"})
-        except Exception as e:
-            st.warning(f"Fel med {ticker}: {e}")
 
-st.subheader("🔍 AI‑signal idag:")
-st.table(pd.DataFrame(results))
+for ticker in stocks:
+    try:
+        data = yf.download(ticker, start=start_date, end=end_date)
+        if data.empty or len(data) < 100:
+            raise ValueError("Otillräcklig data")
+
+        data['Return'] = data['Close'].pct_change()
+        data['Target'] = (data['Return'].shift(-1) > 0).astype(int)
+        data = data.dropna()
+
+        features = ['Open', 'High', 'Low', 'Close', 'Volume']
+        X = data[features]
+        y = data['Target']
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=False, test_size=0.2)
+
+        model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss')
+        model.fit(X_train, y_train)
+
+        y_pred = model.predict(X_test)
+        y_pred_series = pd.Series(y_pred, index=y_test.index)  # Säkerställer rätt index
+        mse = mean_squared_error(y_test, y_pred_series)
+
+        # Senaste köpsignal
+        last_row = X.tail(1)
+        prediction = model.predict(last_row)[0]
+        signal = '✅ Köp' if prediction == 1 else '❌ Sälj'
+
+        results.append({
+            'Aktie': ticker,
+            'Senaste signal': signal,
+            'Träffsäkerhet (%)': round((1 - mse) * 100, 2)
+        })
+
+    except Exception as e:
+        results.append({
+            'Aktie': ticker,
+            'Senaste signal': '⚠️ Fel',
+            'Träffsäkerhet (%)': 'N/A',
+        })
+        st.warning(f"Fel med {ticker}: {e}")
+
+df = pd.DataFrame(results)
+st.table(df)
